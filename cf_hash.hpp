@@ -12,7 +12,7 @@ namespace cfhash {
 
     namespace impl {
 
-        template <typename T, typename Comparator, typename Allocator = std::allocator<T>>
+        template <typename T, typename Comparator, typename Allocator, typename TIt = T>
         class fast_hash_table_impl {
         public:
             static constexpr std::uint32_t NO_NEXT = 0xffffffff;
@@ -33,18 +33,22 @@ namespace cfhash {
                     new (reinterpret_cast<T*>(buf)) T(value);
                 }
 
-                const T* get() const {
-                    return reinterpret_cast<const T*>(buf);
+                const TIt* get() const {
+                    return reinterpret_cast<const TIt*>(buf);
                 }
 
-                T* get() {
+                TIt* get() {
+                    return reinterpret_cast<TIt*>(buf);
+                }
+
+                T* get_mutable() {
                     return reinterpret_cast<T*>(buf);
                 }
 
                 void clear() {
                     if (h != EMPTY) {
                         h = EMPTY;
-                        get()->~T();
+                        get_mutable()->~T();
                     }
                 }
 
@@ -68,7 +72,7 @@ namespace cfhash {
                 }
 
                 void swap(item& other) {
-                    std::swap(*get(), *other.get());
+                    std::swap(*get_mutable(), *other.get_mutable());
                     std::swap(next, other.next);
                     std::swap(h, other.h);
                 }
@@ -87,8 +91,11 @@ namespace cfhash {
 
             std::pair<size_t, bool> insert(T && value, std::uint32_t h) {
                 check_resize();
-
                 h = fix_hash(h);
+                return insert_internal(std::move(value), h);
+            }
+
+            std::pair<size_t, bool> insert_internal(T && value, std::uint32_t h) {
                 std::size_t idx = h % table.size();
 
                 if (table[idx].h == EMPTY) {
@@ -107,6 +114,11 @@ namespace cfhash {
                             return { idx, false };
                         }
                         idx = table[idx].next;
+                    }
+
+                    // We didn't check it yet
+                    if (compare(*table[idx].get(), value)) {
+                        return { idx, false };
                     }
 
                     // Find free element:
@@ -212,11 +224,11 @@ namespace cfhash {
                 using iterator_category = std::forward_iterator_tag;
 
                 reference operator*() {
-                    return table_->table[idx_].value;
+                    return *table_->table[idx_].get();
                 }
 
                 pointer operator->() {
-                    return &table_->table[idx_].value;
+                    return table_->table[idx_].get();
                 }
 
                 bool operator == (const iterator_impl& other) const {
@@ -248,8 +260,8 @@ namespace cfhash {
                 }
             };
 
-            using iterator = iterator_impl<fast_hash_table_impl, T>;
-            using const_iterator = iterator_impl<const fast_hash_table_impl, const T>;
+            using iterator = iterator_impl<fast_hash_table_impl, TIt>;
+            using const_iterator = iterator_impl<const fast_hash_table_impl, const TIt>;
 
             iterator begin() {
                 return iterator(this, first_index());
@@ -267,11 +279,11 @@ namespace cfhash {
                 return const_iterator(this, idx);
             }
 
-            const T& value_at(size_t idx) const {
+            const TIt& value_at(size_t idx) const {
                 return *table[idx].get();
             }
 
-            T& value_at(size_t idx) {
+            TIt& value_at(size_t idx) {
                 return *table[idx].get();
             }
 
@@ -306,7 +318,7 @@ namespace cfhash {
                     throw std::bad_alloc();
                 }
 
-                if (count + count / 4 >= table.size()) {
+                if (count + count / 8 >= table.size()) {
                     do_resize();
                 }
             }
@@ -317,15 +329,14 @@ namespace cfhash {
                     new_size = 0xfffffffe;
                 }
 
-                std::vector<item, inner_allocator> tmp;
-                tmp.resize(new_size);
+                std::vector<item, inner_allocator> tmp{new_size, table.get_allocator()};
 
                 std::swap(tmp, table);
                 count = 0;
 
                 for (auto& item : tmp) {
                     if (item.h != EMPTY) {
-                        insert(std::move(*item.get()), item.h);
+                        insert_internal(std::move(*item.get()), item.h);
                     }
                 }
             }
@@ -452,11 +463,11 @@ namespace cfhash {
             impl_.clear();
         }
 
-        using iterator = typename impl::fast_hash_table_impl<T, Comparator, Allocator>::iterator;
+        using iterator = typename impl::fast_hash_table_impl<T, Comparator, Allocator>::const_iterator;
         using const_iterator = typename impl::fast_hash_table_impl<T, Comparator, Allocator>::const_iterator;
 
         iterator begin() {
-            return impl_.begin();
+            return impl_.cbegin();
         }
 
         iterator end() {
@@ -483,13 +494,13 @@ namespace cfhash {
             std::uint32_t h = hash_(value);
             T tmp = value;
             auto res = impl_.insert(std::move(tmp), h);
-            return {impl_.iterator_at(res.first), res.second};
+            return {impl_.const_iterator_at(res.first), res.second};
         }
 
         std::pair<iterator, bool> insert(T&& value) {
             std::uint32_t h = hash_(value);
             auto res = impl_.insert(std::move(value), h);
-            return {impl_.iterator_at(res.first), res.second};
+            return {impl_.const_iterator_at(res.first), res.second};
         }
 
         std::pair<iterator, bool> insert_or_assign(const T& value) {
@@ -499,14 +510,10 @@ namespace cfhash {
                 *impl_.table[res.first].get() = value;
             }
 
-            return {impl_.iterator_at(res.first), res.second};
+            return {impl_.const_iterator_at(res.first), res.second};
         }
 
         void erase(iterator pos) {
-            impl_.remove(pos);
-        }
-
-        void erase(const_iterator pos) {
             impl_.remove(pos);
         }
 
@@ -557,10 +564,10 @@ namespace cfhash {
             }
         };
 
-        using impl_type = impl::fast_hash_table_impl<item, value_compare, Allocator>;
+        using impl_type = impl::fast_hash_table_impl<item, value_compare, Allocator, std::pair<const Key, Val>>;
         impl_type impl_;
         static constexpr std::uint32_t NO_NEXT = impl::fast_hash_table_impl<item, Comparator, Allocator>::NO_NEXT;
-        hash<Key> hash_;
+        Hash hash_;
     public:
         using size_type = std::size_t;
         using key_type = Key;
@@ -702,6 +709,12 @@ namespace cfhash {
             }
         }
 
+        iterator find(const Key& value) {
+            std::uint32_t h = hash_(value);
+            std::size_t idx = impl_.lookup(value, h);
+            return impl_.iterator_at(idx);
+        }
+
         const_iterator find(const Key& value) const {
             std::uint32_t h = hash_(value);
             std::size_t idx = impl_.lookup(value, h);
@@ -759,6 +772,9 @@ namespace cfhash {
 
             return impl_.value_at(idx).second;
         }
+
+        // Ignore it now
+        void max_load_factor(float) {}
 
     };
 

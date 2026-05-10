@@ -89,7 +89,7 @@ inline std::string ToString(const T& val) {
 
 #define TEST(name) \
     void simple_test__##name(); \
-    static TestRegisterHelper simple_test_register{#name, &simple_test__##name}; \
+    static TestRegisterHelper simple_test__##name##__register{#name, &simple_test__##name}; \
     void simple_test__##name()
 
 #define CHECK(some) \
