@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <utility>
 #include <vector>
 #include <memory>
@@ -91,11 +92,11 @@ namespace cfhash {
 
             std::pair<size_t, bool> insert(T && value, std::uint32_t h) {
                 check_resize();
-                h = fix_hash(h);
-                return insert_internal(std::move(value), h);
-            }
 
-            std::pair<size_t, bool> insert_internal(T && value, std::uint32_t h) {
+                if (h == EMPTY) {
+                    h = 65537;
+                }
+
                 std::size_t idx = h % table.size();
 
                 if (table[idx].h == EMPTY) {
@@ -143,7 +144,10 @@ namespace cfhash {
 
             template <typename T2>
             size_t lookup(const T2& key, std::uint32_t h) const {
-                h = fix_hash(h);
+                if (h == EMPTY) {
+                    h = 65537;
+                }
+
                 size_t idx = h % table.size();
 
                 if (table[idx].h == EMPTY) {
@@ -183,13 +187,16 @@ namespace cfhash {
                     size_t idx2 = table[idx].next;
                     table[idx].swap(table[idx2]);
                     table[idx2].clear();
-                    // TODO: clear element
                     --count;
                     return;
                 }
 
                 while (table[head].next != idx) {
                     head = table[head].next;
+                }
+
+                if (head == NO_NEXT) {
+                    throw std::runtime_error("Corrupted hash table");
                 }
 
                 table[head].next = table[idx].next;
@@ -206,7 +213,10 @@ namespace cfhash {
             class iterator_impl {
                 Cont* table_ = nullptr;
                 size_t idx_ = NO_NEXT;
-                iterator_impl(Cont* table, size_t idx) : idx_(idx) {}
+                iterator_impl(Cont* table, size_t idx)
+                    : table_(table)
+                    , idx_(idx)
+                {}
 
                 friend class fast_hash_table_impl;
             public:
@@ -297,22 +307,6 @@ namespace cfhash {
         private:
             // Implementation details
 
-            static std::uint32_t xorshift32(std::uint32_t x) {
-                // Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
-                x ^= x << 13;
-                x ^= x >> 17;
-                x ^= x << 5;
-                return x;
-            }
-
-            static std::uint32_t fix_hash(std::uint32_t h) {
-                h = xorshift32(xorshift32(h));
-                if (h == EMPTY) {
-                    h = 65537;
-                }
-                return h;
-            }
-
             void check_resize() {
                 if (count == 0xfffffffe) {
                     throw std::bad_alloc();
@@ -336,7 +330,7 @@ namespace cfhash {
 
                 for (auto& item : tmp) {
                     if (item.h != EMPTY) {
-                        insert_internal(std::move(*item.get()), item.h);
+                        insert(std::move(*item.get()), item.h);
                     }
                 }
             }
@@ -392,8 +386,42 @@ namespace cfhash {
 
     using std::hash;
 
+    /** Default hash **/
+    template <typename T, typename Hash = std::hash<T>>
+    struct xorshift_hash_fixture {
+        Hash hash_;
+
+        explicit xorshift_hash_fixture(const Hash& h)
+            : hash_(h)
+        {
+        }
+
+        xorshift_hash_fixture()
+            : hash_{}
+        {
+        }
+
+        xorshift_hash_fixture(const xorshift_hash_fixture&) = default;
+        xorshift_hash_fixture(xorshift_hash_fixture&&) noexcept = default;
+        xorshift_hash_fixture& operator=(const xorshift_hash_fixture&) = default;
+        xorshift_hash_fixture& operator=(xorshift_hash_fixture&&) noexcept = default;
+
+        static std::uint32_t xorshift32(std::uint32_t x) {
+            // Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            return x;
+        }
+
+        std::uint32_t operator()(const T& v) const {
+            std::uint32_t h = hash_(v);
+            return xorshift32(xorshift32(h));
+        }
+    };
+
     /** Interfaces **/
-    template <typename T, typename Hash = std::hash<T>, typename Comparator = std::equal_to<T>, typename Allocator = std::allocator<T>>
+    template <typename T, typename Hash = xorshift_hash_fixture<T>, typename Comparator = std::equal_to<T>, typename Allocator = std::allocator<T>>
     class cf_hash_set {
         impl::fast_hash_table_impl<T, Comparator, Allocator> impl_;
         static constexpr std::uint32_t NO_NEXT = impl::fast_hash_table_impl<T, Comparator, Allocator>::NO_NEXT;
@@ -543,7 +571,7 @@ namespace cfhash {
     };
 
     /** Hash map **/
-    template <typename Key, typename Val, typename Hash = std::hash<Key>, typename Comparator = std::equal_to<Key>, typename Allocator = std::allocator<std::pair<const Key, Val>>>
+    template <typename Key, typename Val, typename Hash = xorshift_hash_fixture<Key>, typename Comparator = std::equal_to<Key>, typename Allocator = std::allocator<std::pair<const Key, Val>>>
     class cf_hash_map {
         using item = std::pair<Key, Val>;
 

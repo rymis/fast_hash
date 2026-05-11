@@ -68,4 +68,48 @@ TEST(us_hash_set_more_values) {
             CHECK(!set.contains(v));
         }
     }
+
+    for (int i = 0; i < 10000; ++i) {
+        std::uint32_t v = rnd() & 0xffffff;
+        set.erase(v);
+        etalon.erase(v);
+    }
+
+    for (int i = 0; i < 1000000; ++i) {
+        std::uint32_t v = rnd() & 0xffffff;
+        if (etalon.count(v)) {
+            CHECK(set.contains(v));
+        } else {
+            CHECK(!set.contains(v));
+        }
+    }
+}
+
+TEST(us_hash_set_iterator) {
+    cfhash::cf_hash_set<std::uint32_t> set;
+
+    set.insert(1);
+    set.insert(2);
+    set.insert(3);
+    set.insert(2);
+    set.insert(1);
+
+    auto it = set.begin();
+    CHECK(it != set.end());
+    CHECK(it == set.begin());
+    CHECK(*it < 4 && *it > 0);
+
+    ++it;
+    CHECK(it != set.end());
+    CHECK(it != set.begin());
+    CHECK(*it < 4 && *it > 0);
+
+    ++it;
+    CHECK(it != set.end());
+    CHECK(it != set.begin());
+    CHECK(*it < 4 && *it > 0);
+
+    ++it;
+    CHECK(it == set.end());
+    CHECK(it != set.begin());
 }
