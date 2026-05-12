@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <new>
 #include <utility>
 #include <vector>
 #include <memory>
@@ -17,14 +18,30 @@ namespace cfhash {
         class fast_hash_table_impl {
         public:
             static constexpr std::uint32_t NO_NEXT = 0xffffffff;
-            static constexpr std::uint32_t EMPTY = 0xffffffff;
+            static constexpr std::uint32_t USED_MASK = 0x80000000;
+            static constexpr std::uint32_t MAX_COUNT = 0x7fffffff;
+
+            static size_t table_size_helper(size_t req) {
+                size_t res = 16;
+                if (req > USED_MASK) {
+                    throw std::bad_alloc{};
+                }
+
+                while (res < req && res != USED_MASK) res <<= 1;
+
+                return res;
+            }
 
             struct item {
-                std::uint32_t h = EMPTY;
-                std::uint32_t next = NO_NEXT;
-
                 static constexpr std::size_t VALUE_SIZE = std::max<std::size_t>(sizeof(T), 1);
+
+                std::uint32_t h = 0;
+                std::uint32_t next;
                 alignas(alignof(T)) unsigned char buf[VALUE_SIZE];
+
+                bool empty() const {
+                    return !(h & USED_MASK);
+                }
 
                 void emplace(T && value) {
                     new (reinterpret_cast<T*>(buf)) T(std::move(value));
@@ -47,16 +64,14 @@ namespace cfhash {
                 }
 
                 void clear() {
-                    if (h != EMPTY) {
-                        h = EMPTY;
+                    if (!empty()) {
+                        h = 0;
                         get_mutable()->~T();
                     }
                 }
 
                 ~item() {
-                    if (h != EMPTY) {
-                        clear();
-                    }
+                    clear();
                 }
 
                 item() = default;
@@ -85,21 +100,19 @@ namespace cfhash {
             Comparator compare;
 
             fast_hash_table_impl(Comparator cmp, size_t initial_size, const Allocator& alloc)
-                : table(initial_size < 16? 16: initial_size, alloc)
+                : table(table_size_helper(initial_size), alloc)
                 , compare(cmp)
             {
+                hash_mask = table.size() - 1;
             }
 
             std::pair<size_t, bool> insert(T && value, std::uint32_t h) {
                 check_resize();
+                h |= USED_MASK;
 
-                if (h == EMPTY) {
-                    h = 65537;
-                }
+                std::size_t idx = h & hash_mask;
 
-                std::size_t idx = h % table.size();
-
-                if (table[idx].h == EMPTY) {
+                if (table[idx].empty()) {
                     // Simple insert at empty position
                     table[idx].h = h;
                     table[idx].next = NO_NEXT;
@@ -108,17 +121,17 @@ namespace cfhash {
                     return { idx, true };
                 }
 
-                if (table[idx].h % table.size() == idx) {
+                if ((table[idx].h & hash_mask) == idx) {
                     // We have elements in this bucket
                     while (table[idx].next != NO_NEXT) {
-                        if (compare(*table[idx].get(), value)) {
+                        if (table[idx].h == h && compare(*table[idx].get(), value)) {
                             return { idx, false };
                         }
                         idx = table[idx].next;
                     }
 
                     // We didn't check it yet
-                    if (compare(*table[idx].get(), value)) {
+                    if (table[idx].h == h && compare(*table[idx].get(), value)) {
                         return { idx, false };
                     }
 
@@ -144,24 +157,21 @@ namespace cfhash {
 
             template <typename T2>
             size_t lookup(const T2& key, std::uint32_t h) const {
-                if (h == EMPTY) {
-                    h = 65537;
-                }
+                size_t idx = h & hash_mask;
+                h |= USED_MASK;
 
-                size_t idx = h % table.size();
-
-                if (table[idx].h == EMPTY) {
+                if (table[idx].empty()) {
                     // Empty element: nothing to do
                     return NO_NEXT;
                 }
 
-                if (table[idx].h % table.size() != idx) {
+                if ((table[idx].h & hash_mask) != idx) {
                     // Different bucket: no elements with this hash modulo size
                     return NO_NEXT;
                 }
 
                 while (idx != NO_NEXT) {
-                    if (compare(*table[idx].get(), key)) {
+                    if (table[idx].h == h && compare(*table[idx].get(), key)) {
                         return idx;
                     }
                     idx = table[idx].next;
@@ -172,11 +182,11 @@ namespace cfhash {
             }
 
             void remove(size_t idx) {
-                if (table[idx].h == EMPTY) {
+                if (table[idx].empty()) {
                     return;
                 }
 
-                size_t head = table[idx].h % table.size();
+                size_t head = table[idx].h & hash_mask;
                 if (head == idx) { // We need to remove head
                     if (table[idx].next == NO_NEXT) {
                         table[idx].clear();
@@ -209,18 +219,23 @@ namespace cfhash {
                 std::swap(tmp, table);
             }
 
-            template <typename Cont, typename Value>
+            template <typename Item, typename Value>
             class iterator_impl {
-                Cont* table_ = nullptr;
-                size_t idx_ = NO_NEXT;
-                iterator_impl(Cont* table, size_t idx)
-                    : table_(table)
-                    , idx_(idx)
+                Item* ptr_;
+                Item* end_;
+                iterator_impl(Item* first, Item *last)
+                    : ptr_(first)
+                    , end_(last)
                 {}
 
                 friend class fast_hash_table_impl;
             public:
-                iterator_impl() = default;
+                iterator_impl()
+                    : ptr_(nullptr)
+                    , end_(nullptr)
+                {
+                }
+
                 iterator_impl(const iterator_impl&) = default;
                 iterator_impl(iterator_impl&&) noexcept = default;
                 iterator_impl& operator = (const iterator_impl&) = default;
@@ -234,59 +249,56 @@ namespace cfhash {
                 using iterator_category = std::forward_iterator_tag;
 
                 reference operator*() {
-                    return *table_->table[idx_].get();
+                    return *ptr_->get();
                 }
 
                 pointer operator->() {
-                    return table_->table[idx_].get();
+                    return ptr_->get();
                 }
 
                 bool operator == (const iterator_impl& other) const {
-                    return idx_ == other.idx_;
+                    return ptr_ == other.ptr_;
                 }
 
                 bool operator != (const iterator_impl& other) const {
-                    return idx_ != other.idx_;
+                    return ptr_ != other.ptr_;
                 }
 
                 iterator_impl& operator++() {
-                    if (table_ == nullptr) {
-                        idx_ = NO_NEXT;
-                        return *this;
-                    }
-
-                    ++idx_;
-                    const size_t size = table_->table.size();
-                    while (idx_ < size && table_->table[idx_].h == EMPTY) {
-                        ++idx_;
-                    }
-
-                    if (idx_ >= size) {
-                        idx_ = NO_NEXT;
-                        return *this;
+                    ++ptr_;
+                    while (ptr_ != end_ && ptr_->empty()) {
+                        ++ptr_;
                     }
 
                     return *this;
                 }
             };
 
-            using iterator = iterator_impl<fast_hash_table_impl, TIt>;
-            using const_iterator = iterator_impl<const fast_hash_table_impl, const TIt>;
+            using iterator = iterator_impl<item, TIt>;
+            using const_iterator = iterator_impl<const item, const TIt>;
 
             iterator begin() {
-                return iterator(this, first_index());
+                return iterator_at(first_index());
             }
 
             const_iterator cbegin() {
-                return const_iterator(this, first_index());
+                return const_iterator_at(first_index());
+            }
+
+            iterator end() {
+                return iterator_at(table.size());
+            }
+
+            const_iterator cend() {
+                return const_iterator_at(table.size());
             }
 
             iterator iterator_at(size_t idx) {
-                return iterator(this, idx);
+                return iterator(table.data() + idx, table.data() + table.size());
             }
 
             const_iterator const_iterator_at(size_t idx) const {
-                return const_iterator(this, idx);
+                return const_iterator(table.data() + idx, table.data() + table.size());
             }
 
             const TIt& value_at(size_t idx) const {
@@ -306,43 +318,51 @@ namespace cfhash {
             }
         private:
             // Implementation details
+            size_t hash_mask = 0;
 
             void check_resize() {
-                if (count == 0xfffffffe) {
+                size_t border = count + count / 8;
+                if (border <= table.size()) {
+                    return;
+                }
+
+                if (count == MAX_COUNT) {
                     throw std::bad_alloc();
                 }
 
-                if (count + count / 8 >= table.size()) {
-                    do_resize();
+                if (table.size() == USED_MASK) {
+                    return;
                 }
+
+                do_resize();
             }
 
             void do_resize() {
-                std::size_t new_size = table.size() * 2 + 3;
-                if (new_size > 0xfffffffe) {
-                    new_size = 0xfffffffe;
-                }
+                std::size_t new_size = table.size() * 2;
 
                 std::vector<item, inner_allocator> tmp{new_size, table.get_allocator()};
 
                 std::swap(tmp, table);
                 count = 0;
+                hash_mask = table.size() - 1;
 
                 for (auto& item : tmp) {
-                    if (item.h != EMPTY) {
+                    if (!item.empty()) {
                         insert(std::move(*item.get()), item.h);
                     }
                 }
             }
 
             size_t find_free_element(size_t idx) const {
-                for (size_t i = 1; i < table.size(); ++i) {
-                    ++idx;
-                    if (idx >= table.size()) {
-                        idx = 0;
+                for (size_t i = idx + 1; i < table.size(); ++i) {
+                    if (table[i].empty()) {
+                        return i;
                     }
-                    if (table[idx].h == EMPTY) {
-                        return idx;
+                }
+
+                for (size_t i = 0; i < idx; ++i) {
+                    if (table[i].empty()) {
+                        return i;
                     }
                 }
 
@@ -350,7 +370,7 @@ namespace cfhash {
             }
 
             void move_element_away(size_t idx) {
-                size_t head = table[idx].h % table.size();
+                size_t head = table[idx].h & hash_mask;
                 if (head == idx) {
                     throw std::runtime_error("Internal error: can't move head element away");
                 }
@@ -370,7 +390,7 @@ namespace cfhash {
                     return NO_NEXT;
                 }
                 const size_t size = table.size();
-                while (idx < size && table[idx].h == EMPTY) {
+                while (idx < size && table[idx].empty()) {
                     ++idx;
                 }
 
@@ -499,7 +519,7 @@ namespace cfhash {
         }
 
         iterator end() {
-            return iterator();
+            return impl_.cend();
         }
 
         const_iterator begin() const {
@@ -507,7 +527,7 @@ namespace cfhash {
         }
 
         const_iterator end() const {
-            return const_iterator();
+            return impl_.cend();
         }
 
         const_iterator cbegin() const {
@@ -515,7 +535,7 @@ namespace cfhash {
         }
 
         const_iterator cend() const {
-            return const_iterator();
+            return impl_.cend();
         }
 
         std::pair<iterator, bool> insert(const T& value) {
@@ -666,7 +686,7 @@ namespace cfhash {
         }
 
         iterator end() {
-            return iterator();
+            return impl_.end();
         }
 
         const_iterator begin() const {
@@ -674,7 +694,7 @@ namespace cfhash {
         }
 
         const_iterator end() const {
-            return const_iterator();
+            return impl_.cend();
         }
 
         const_iterator cbegin() const {
@@ -682,7 +702,7 @@ namespace cfhash {
         }
 
         const_iterator cend() const {
-            return const_iterator();
+            return impl_.cend();
         }
 
         std::pair<iterator, bool> insert(const Key& value, const Val& val) {
