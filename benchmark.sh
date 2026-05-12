@@ -24,6 +24,9 @@ fi
 # 2. Patch repo to use our library (if not patched yet)
 if [ \! -f .patched ]; then
     echo Patch
+    echo '#define SHIM_16 cf_hash' >> "$W/config.h"
+    mkdir -p "$W/shims/cf_hash"
+    cp shim.h "$W/shims/cf_hash/"
     touch .patched
 fi
 
