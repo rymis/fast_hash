@@ -33,10 +33,10 @@ namespace cfhash {
             }
 
             struct item {
+                static constexpr std::size_t VALUE_SIZE = std::max<std::size_t>(sizeof(T), 1);
+
                 std::uint32_t h = 0;
                 std::uint32_t next;
-
-                static constexpr std::size_t VALUE_SIZE = std::max<std::size_t>(sizeof(T), 1);
                 alignas(alignof(T)) unsigned char buf[VALUE_SIZE];
 
                 bool empty() const {
@@ -321,6 +321,11 @@ namespace cfhash {
             size_t hash_mask = 0;
 
             void check_resize() {
+                size_t border = count + count / 8;
+                if (border <= table.size()) {
+                    return;
+                }
+
                 if (count == MAX_COUNT) {
                     throw std::bad_alloc();
                 }
@@ -329,9 +334,7 @@ namespace cfhash {
                     return;
                 }
 
-                if (count + count / 8 >= table.size()) {
-                    do_resize();
-                }
+                do_resize();
             }
 
             void do_resize() {
@@ -351,13 +354,15 @@ namespace cfhash {
             }
 
             size_t find_free_element(size_t idx) const {
-                for (size_t i = 1; i < table.size(); ++i) {
-                    ++idx;
-                    if (idx >= table.size()) {
-                        idx = 0;
+                for (size_t i = idx + 1; i < table.size(); ++i) {
+                    if (table[i].empty()) {
+                        return i;
                     }
-                    if (table[idx].empty()) {
-                        return idx;
+                }
+
+                for (size_t i = 0; i < idx; ++i) {
+                    if (table[i].empty()) {
+                        return i;
                     }
                 }
 
